@@ -35,9 +35,10 @@ type PubSub struct {
 
 	cmd *Cmd
 
-	chOnce sync.Once
-	msgCh  *channel
-	allCh  *channel
+	chOnce      sync.Once
+	msgCh       *channel
+	allCh       *channel
+	HealthCheck []context.CancelFunc
 }
 
 func (c *PubSub) init() {
@@ -591,8 +592,20 @@ func newChannel(pubSub *PubSub, opts ...ChannelOption) *channel {
 }
 
 func (c *channel) initHealthCheck() {
-	ctx := context.TODO()
+	const maxHealthCheck = 30
+
+	ctx, cancel := context.WithCancel(context.Background())
 	c.ping = make(chan struct{}, 1)
+
+	c.pubSub.mu.Lock()
+	c.pubSub.HealthCheck = append(c.pubSub.HealthCheck, cancel)
+	if len(c.pubSub.HealthCheck) > maxHealthCheck {
+		for _, oldCancel := range c.pubSub.HealthCheck[:10] {
+			oldCancel()
+		}
+		c.pubSub.HealthCheck = c.pubSub.HealthCheck[10:]
+	}
+	c.pubSub.mu.Unlock()
 
 	go func() {
 		timer := time.NewTimer(time.Minute)
@@ -612,6 +625,11 @@ func (c *channel) initHealthCheck() {
 					c.pubSub.mu.Unlock()
 				}
 			case <-c.pubSub.exit:
+				if len(c.pubSub.HealthCheck) != 0 {
+					c.pubSub.HealthCheck = nil
+				}
+				return
+			case <-ctx.Done():
 				return
 			}
 		}
